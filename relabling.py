@@ -9,6 +9,8 @@ class DatasetRelable:
         self.label = label
 
         self.shape = self.dataset.drop(columns=self.label, axis=1).shape
+        self.x = 0
+        self.y = 1
 
 
 
