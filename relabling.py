@@ -5,26 +5,46 @@ import seaborn as sns
 
 import numpy as np
 
-from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
+
+from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
 
 
 
 class DatasetRelable:
-    def __init__(self, dataset: pd.DataFrame, target_col: str,
-                 data_mode: str='already_processed',
-                 cat_cols: list=None, numeric_cols: list=None,
-                 ordinal_cols: list=None, time_col: str=None,
-                 split_edges: list=[0.25, 0.5, 0.75]) -> None:
-        
+    def __init__(self, dataset: pd.DataFrame,
+                       target_col: str,
+                       time_col: str=None,
+                       split_edges: list=[0.3, 0.533, 0.766],
+                       data_mode: str='already_processed',
+                       cat_cols: list=None,
+                       numeric_cols: list=None,
+                       ordinal_cols: list=None) -> None:
+        """
+        `dataset`: source data for processing
+        `target_col`: target column
+
+        `data_mode`: Two possible values:
+
+            - 'already_processed'
+
+            - 'source_data'
+
+        `split_edges`: List of float to split data into 4 subsets: 
+            [D_init, D_train, D_control_1, D_control_2]
+        """
+
         # dataset info
         self.dataset = dataset
         self.target_col = target_col
         self.data_mode = data_mode
+
         self._columns = dataset.columns
+        self._service_columns = [target_col, time_col, 'split_group', 'target_score']
 
         # columns parameters
         self.cat_cols = cat_cols
@@ -57,7 +77,125 @@ class DatasetRelable:
     
     
     def _get_split_statistics(self):
+        """
+        Showing basic statistics of dataset: `shape` and `disbalance`
+        """
+        for group in self._edges_mapping:
+            print(self._get_statistic_per_group(group))
+
+
+    def _get_statistic_per_group(self, group):
+        group_shape = self.dataset[self.dataset.split_group == self._edges_mapping[group]].shape
+        fraud_cnt = self.dataset[
+            (self.dataset.split_group == self._edges_mapping[group])
+            & (self.dataset[self.target_col] == 1)
+            ].shape[0]
+        
+        disbalance = fraud_cnt / group_shape[0] * 100
+
+        return f"{self._edges_mapping[group]}: shape is {group_shape}\nDisbalance: {disbalance:.1f}% \n"
+    
+
+    def _prepare_data_for_train(self, split_group):
+        X = (
+            self.dataset[self.dataset.split_group == split_group]
+            .drop(columns=self._service_columns, axis=1, errors='ignore')
+            )
+        y = self.dataset[self.dataset.split_group == split_group][self.target_col]
+
+        return X, y
+    
+
+    def _prepare_index_for_train(self, split_group):
+        train_indexes = (
+            self.dataset[self.dataset.split_group == split_group]
+            .index.to_numpy()
+        )
+        train_columns = self.dataset.drop(columns=self._service_columns, axis=1, errors='ignore').columns
+
+        return train_indexes, train_columns
+
+
+
+    def train_relabler(self, parameters: dict,
+                             model,
+                             scoring: str='roc_auc'):
+        """
+        Train model-relabler on 'D_init' part of dataset
+        """
+
+        inds, cols = self._prepare_index_for_train('D_init')
+
+        M_rl = GridSearchCV(estimator=model,
+                            param_grid=parameters,
+                            refit=True,
+                            scoring=scoring,
+                            cv=3
+                           ).fit(self.dataset.loc[inds, cols],
+                                 self.dataset.loc[inds, self.target_col])
+        
+        self.relabler = M_rl
+        self.dataset.loc[inds, 'target_score'] = M_rl.predict_proba(self.dataset.loc[inds, cols])[:, 1]
+
+        print(f'Scoring "{scoring}" is {M_rl.best_score_}')
+        print(f'Best params: {M_rl.best_params_}')
+
+
+    def plot_relabler_distribution(self):
+        """
+        Plot distribution of D_init data by target
+        """
+        data_for_plot = self.dataset[[self.target_col, 'target_score']]
+
+        sns.displot(data_for_plot, x='target_score',
+                    hue=self.target_col, stat='desnsity', common_norm=False)
+
+
+
+
+
+    def train_base_model(self, parameters: dict,
+                               model,
+                               scoring: str='roc_auc'):
+        """
+        Train baseline model on `D_train` part of dataset without relabling
+        then validate on `D_control_1`
+        
+        """
+
+        train_ind, cols = self._prepare_data_for_train('D_train')
+        val_ind, _ = self._prepare_data_for_train('D_control_1')
+
+        M_base = GridSearchCV(estimator=model,
+                            param_grid=parameters,
+                            refit=True,
+                            scoring=scoring,
+                            cv=3
+                           ).fit(self.dataset.loc[train_ind, cols],
+                                 self.dataset.loc[train_ind, self.target_col])
+        
+        self.base_model = M_base
+
+        print(f'Scoring "{scoring}" is {M_base.best_score_}')
+        print(f'Best params: {M_base.best_params_}')
+    
+
+
+    def train_base_relable_model(self):
+        """
+        """
+        train_ind, cols = self._prepare_data_for_train('D_train')
+
+
+
+    def compare_models(self):
         pass
+
+
+
+    def _change_bounds(self):
+        pass
+
 
 
     def __str__(self):
@@ -102,21 +240,3 @@ class DatasetRelable:
 
         self.preprocess_pipeline = preprocessor
         return preprocessor
-
-
-    def plot_data(self, mode='whole'):
-        if self.time_col is not None:
-            if mode == 'whole':
-                sns.histplot(self.dataset, x=self.time_col,
-                             bins=self.dataset.shape[0] // 1000,
-                             hue=self.target_col)
-                
-            elif mode == 'edges':
-                sns.histplot(self.dataset, x=self.time_col,
-                             bins=self.dataset.shape[0] // 1000,
-                             hue='split_group')
-            else:
-                raise Exception(f"No such 'mode'='{mode}'")
-        else:
-            raise Exception("There is no 'time_col'")
-
