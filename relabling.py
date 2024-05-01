@@ -62,7 +62,8 @@ class DatasetRelable:
         self._split_col = 'split_group'
         self._relable_score_col = 'target_score'
         self._relable_target_col = 'target_relabled'
-        self._service_columns = [self.target_col, self.time_col, self._split_col, self._relable_score_col]
+        self._service_columns = [self.target_col, self.time_col, self._split_col,
+                                 self._relable_score_col, self._relable_target_col]
 
         self._models_path = 'models/'
         self._model_relabler_path = self._models_path + 'relabler'
@@ -276,8 +277,11 @@ class DatasetRelable:
         self.dataset.loc[self.dataset[self._relable_score_col] >= TH_f, self._relable_target_col] = 1
 
 
-    def _plot_TH_matrix(self):
-        sns.heatmap(self.TH_matrix, annot=True, cmap='BuGn')
+    def plot_TH_matrix(self):
+        """
+        Plot heatmap based on various thresholds TH_l and TH_f after training model on relabled data `D_train`
+        """
+        sns.heatmap(self.TH_matrix.sort_index(ascending=False), annot=True, cmap='BuGn')
 
 
 
