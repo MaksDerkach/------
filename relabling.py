@@ -5,19 +5,16 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 sns.set_style('darkgrid')
 
-from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
-
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.compose import ColumnTransformer
+from sklearn.metrics import roc_auc_score, f1_score
 
 from joblib import dump, load
 
+from models import Preprocessor, DummyModel
+
 import os
 import shutil
-
 
 
 class DatasetRelable:
@@ -25,9 +22,7 @@ class DatasetRelable:
                        target_col: str,
                        time_col: str=None,
                        time_col_type='int',
-                       preprocessed: bool=True,
-                       cat_cols: list=None,
-                       numeric_cols: list=None) -> None:
+                       preprocessed: bool=True) -> None:
         """
         `dataset`: source data for processing
         `target_col`: target column
@@ -57,7 +52,6 @@ class DatasetRelable:
         self._edges_mapping = {0: 'D_init', 1: 'D_train',
                                2: 'D_control_1', 3: 'D_control_2'}
         
-        self._source_columns = dataset.columns
         self._split_col = 'split_group'
         self._relable_score_col = 'target_score'
         self._relable_target_col = 'target_relabled'
@@ -76,14 +70,8 @@ class DatasetRelable:
             os.makedirs(self._models_path)
 
 
-        # first-step of processing the data
-        if ((cat_cols is None) or (numeric_cols is None)) and (not preprocessed):
-            self._auto_selection_dtypes()
-        else:
-            self.cat_cols = cat_cols
-            self.numeric_cols = numeric_cols
-        
-        self.preprocessor = self._preprocess_data()
+        if not self._is_preprocessed:
+            self.preprocessor = Preprocessor(self.dataset.drop(columns=self._service_columns, errors='ignore'))
         
 
 
@@ -178,68 +166,55 @@ class DatasetRelable:
 
 
 
-    def train_relabler(self, parameters: dict,
-                             model,
-                             scoring: str='f1',
-                             n_jobs=None,
-                             verbose=2):
+    def train_relabler(self, params: dict):
         """
         Train model-relabler on 'D_init' part of dataset
+        'params' is a dict-like object with required fields:
+
+            - `model` - is a source model for training
+            - `parameters` - grid of parameters for searching best algorithm
+            - `scoring` - one or dict of scores
+            - `refit`
+            - `need_smote`
         """
 
         inds, cols = self._prepare_index_for_train('D_init')
 
-        # only for not preprocessed data
-        if not self._is_preprocessed:
-            model = Pipeline(
-                steps=[
-                    ('preprocessor', self.preprocessor),
-                    ('model', model)
-                ]
-            )
+        X = self.dataset.loc[inds, cols]
+        y = self.dataset.loc[inds, self.target_col]
 
-            parameters = {'model__' + key: values for key, values in parameters.items()}
-
-
-        M_rl = GridSearchCV(estimator=model,
-                            param_grid=parameters,
-                            refit=True,
-                            scoring=scoring,
-                            cv=3,
-                            verbose=verbose,
-                             n_jobs=n_jobs
-                           ).fit(self.dataset.loc[inds, cols],
-                                 self.dataset.loc[inds, self.target_col])
-        
-        self.relabler = M_rl
-        self.dataset.loc[inds, self._relable_score_col] = M_rl.predict_proba(self.dataset.loc[inds, cols])[:, 1]
+        self.M_relabler = DummyModel(preprocessor=self.preprocessor.pipe, **params).fit(X, y)
 
         # save current model
-        if not os.path.exists(self._model_relabler_path):
-            os.makedirs(self._model_relabler_path)
-        dump(M_rl, f"{self._model_relabler_path}/model_relabler.joblib")
-
-        print(f'Scoring "{scoring}" is {M_rl.best_score_}')
-        print(f'Best params: {M_rl.best_params_}')
+        self._save_model(self.M_relabler, self._model_relabler_path, 'model_relabler')
 
 
 
-    def plot_relabler_distribution(self, bins_step=0.01):
+    def plot_relabler_distribution(self, bins_step=0.01, subset='D_init'):
         """
-        Plot distribution of D_init data by target
+        Plot distribution of `subset` data by target
         """
-        data_for_plot = self.dataset[self.dataset[self._split_col] == 'D_init'][[self.target_col, self._relable_score_col]]
         bins_range = np.arange(0, 1 + bins_step, bins_step)
+        inds, cols = self._prepare_index_for_train(subset)
+        
+        X = self.dataset.loc[inds, cols]
+        y = self.dataset.loc[inds, self.target_col]
 
+        y_proba = self.M_relabler.predict_proba(X)[:, 1]
+
+        data_for_plot = pd.concat([y.reset_index(drop=True), pd.Series(y_proba)], axis=1) \
+                          .set_axis([self.target_col, self._relable_score_col], axis=1)
+        
         sns.displot(data_for_plot, x=self._relable_score_col,
                     hue=self.target_col, bins=bins_range,
                     stat='density', common_norm=False)
 
 
 
+
     def train_base_model(self, parameters: dict,
                                model,
-                               scoring: str='f1',
+                               scoring: str='average_precision',
                                n_jobs=None,
                                verbose=2):
         """
@@ -285,14 +260,14 @@ class DatasetRelable:
 
     def train_base_relable_model(self, parameters: dict,
                                        model,
-                                       TH_legetim,
-                                       TH_fraud,
-                                       TH_legetim_step,
-                                       TH_fraud_step,
-                                       scoring: str='roc_auc',
+                                       TH_legetim: dict,
+                                       TH_fraud: dict,
+                                       scoring: str='average_precision',
                                        n_jobs=None,
                                        verbose=2):
         """
+        `TH_legetim` dict like {start: float, stop: float, step: float}
+        `TH_fraud` dict like {start: float, stop: float, step: float}
         """
         inds, cols = self._prepare_index_for_train('D_train')
         val_inds, _ = self._prepare_index_for_train('D_control_1')
@@ -310,12 +285,12 @@ class DatasetRelable:
 
         self.TH_matrix = []
         model_number = 1
-        n_steps = len(np.arange(0, TH_legetim, TH_legetim_step)) * len(np.arange(1, TH_fraud, -TH_fraud_step))
+        n_steps = len(np.arange(**TH_legetim)) * len(np.arange(**TH_fraud))
     
         print(f'Eproximate steps: {n_steps}')
 
-        for TH_l in np.arange(0, TH_legetim, TH_legetim_step):
-            for TH_f in np.arange(1, TH_fraud, -TH_fraud_step):
+        for TH_l in np.arange(**TH_legetim):
+            for TH_f in np.arange(**TH_fraud):
 
                 print(f'Step {model_number} ... ')
                 self._change_bounds(TH_l, TH_f)
@@ -353,11 +328,12 @@ class DatasetRelable:
         self.dataset.loc[self.dataset[self._relable_score_col] >= TH_f, self._relable_target_col] = 1
 
 
-    def plot_TH_matrix(self):
+    def plot_TH_matrix(self, cmap='BuGn'):
         """
         Plot heatmap based on various thresholds TH_l and TH_f after training model on relabled data `D_train`
         """
-        sns.heatmap(self.TH_matrix.sort_index(ascending=False), annot=True, cmap='BuGn')
+        sns.heatmap(self.TH_matrix.sort_index(ascending=False),
+                    annot=True, cmap=cmap, fmt='.4g')
 
 
 
@@ -369,56 +345,22 @@ class DatasetRelable:
         val_inds, cols = self._prepare_index_for_train('D_control_2')
 
         model_M_b = self.base_model
+        M_b_prediction = model_M_b.predict_proba(self.dataset.loc[val_inds, cols])[:, 1]
+        M_b_score = roc_auc_score(self.dataset.loc[val_inds, self.target_col], M_b_prediction)
 
-        # only for not preprocessed data
-        if not self._is_preprocessed:
-            model = Pipeline(
-                steps=[
-                    ('preprocessor', self.preprocessor),
-                    ('model', model)
-                ]
-            )
-        pass
-
-
+        return M_b_score
+    
+    def _save_model(self, object, path, name):
+        if not os.path.exists(path):
+            os.makedirs(path)
+        dump(object, f"{path}/{name}.joblib")
+    
 
     def __str__(self):
+        cat_cols, numeric_cols = self.preprocessor.cat_cols, self.preprocessor.numeric_cols
+
         return f"Data shape is {self.dataset.shape}, target column is '{self.target_col}'\n" +\
-            f"Categorical columns: {self.cat_cols}\n" +\
-            f"Numeric columns: {self.numeric_cols}\n" +\
+            f"Categorical columns: {cat_cols}\n" +\
+            f"Numeric columns: {numeric_cols}\n" +\
             f"Time column is '{self.time_col}'\n"
 
-
-    def _auto_selection_dtypes(self):
-        """
-        Automatic selection of data types
-        """
-
-        self.cat_cols = []
-        self.numeric_cols = []     
-
-        for col_name, dtype in self.dataset.drop(columns=self._service_columns, errors='ignore').dtypes.items():
-            if type(dtype) in [np.dtypes.Int64DType, np.dtypes.Float64DType]:
-                self.numeric_cols.append(col_name)
-            elif type(dtype) in [np.dtypes.ObjectDType]:
-                self.cat_cols.append(col_name)
-
-
-    def _preprocess_data(self):
-        numeric_transform = Pipeline(
-            steps=[('imputer', SimpleImputer(strategy='median')),
-                   ('scaler', StandardScaler())]
-        )
-
-        categorical_transform = Pipeline(
-            steps=[('encoder', OneHotEncoder(handle_unknown='infrequent_if_exist'))]
-        )
-
-        preprocessor = ColumnTransformer(
-            transformers=[
-                ('numeric', numeric_transform, self.numeric_cols),
-                ('categorical', categorical_transform, self.cat_cols)
-            ]
-        )
-
-        return preprocessor
