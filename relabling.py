@@ -7,11 +7,11 @@ sns.set_style('darkgrid')
 
 from sklearn.neural_network import MLPClassifier
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.metrics import roc_auc_score, f1_score
+from sklearn.metrics import roc_auc_score, average_precision_score
 
 from joblib import dump, load
 
-from models import Preprocessor, DummyModel
+from models import Preprocessor, DummyModel, Splitter
 
 import os
 import shutil
@@ -40,17 +40,13 @@ class DatasetRelable:
         # dataset info
         self.dataset = dataset
 
-        if time_col is not None:
-            self.dataset = self.dataset.sort_values(time_col, ascending=True).reset_index(drop=True)
-
         self.target_col = target_col
         self._is_preprocessed = preprocessed
         self.time_col = time_col
         self.time_col_type = time_col_type
 
         # service attributes
-        self._edges_mapping = {0: 'D_init', 1: 'D_train',
-                               2: 'D_control_1', 3: 'D_control_2'}
+        self._bounds_mapping = {0: 'D_init', 1: 'D_train', 2: 'D_control_1', 3: 'D_control_2'}
         
         self._split_col = 'split_group'
         self._relable_score_col = 'target_score'
@@ -59,8 +55,8 @@ class DatasetRelable:
                                  self._relable_score_col, self._relable_target_col]
 
         self._models_path = 'models/'
-        self._model_relabler_path = self._models_path + 'relabler'
-        self._model_base_path = self._models_path + 'base_model'
+        self._model_relabler_path = self._models_path + 'relabler_model'
+        self._model_baseline_path = self._models_path + 'baseline_model'
         self._model_relabled_path = self._models_path + 'relabled_model'
 
         if not os.path.exists(self._models_path):
@@ -72,36 +68,23 @@ class DatasetRelable:
 
         if not self._is_preprocessed:
             self.preprocessor = Preprocessor(self.dataset.drop(columns=self._service_columns, errors='ignore'))
+    
+
+    def split_data(self, bounds: list=[0.3, 0.533, 0.766]):
+        if self.time_col is not None:
+            self.dataset = self.dataset.sort_values(self.time_col, ascending=True).reset_index(drop=True)
+            strategic = 'index'
         
-
-
-    def _get_index_edges(self, edges):
-        edges = (np.array(edges) * self.dataset.shape[0]).astype(int)
-        return edges
-    
-
-    def _split_to_edges(self):
-        """
-        Split dataset into 4 subsets: 
-            [D_init, D_train, D_control_1, D_control_2]
-        """
-        for n_group, sub_index in enumerate(np.split(self.dataset.index.to_numpy(), self.index_edges)):
-            self.dataset.loc[sub_index, self._split_col] = self._edges_mapping[n_group]
-    
-
-    def split_data_and_get_stat(self, split_edges: list=[0.3, 0.533, 0.766], n_ticks=10):
-        """
-        Plot the graph (if `time_col` is not empty) of splitted dataset 
-        and show basic statistics of subsets: `shape` and `disbalance`
-        """
-        # split for 4 subsets
-        self.raw_edges = split_edges
-        self.index_edges = self._get_index_edges(self.raw_edges)
-        self._split_to_edges()
+        self.dataset[self._split_col] = Splitter(bounds, self._bounds_mapping, strategic).split(self.dataset) 
 
         # show statistic per subset
-        self._get_split_statistics()
+        self._get_split_statistics()       
 
+
+    def show_splits(self, split_edges: list=[0.3, 0.533, 0.766], n_ticks=10):
+        """
+        Plot the graph (if `time_col` is not empty) of splitted dataset
+        """
         if self.time_col is not None:
             if self.time_col_type == 'int':
                 sns.histplot(self.dataset, x=self.time_col,
@@ -124,35 +107,24 @@ class DatasetRelable:
                 plt.xticks(ticks, labels, rotation=45)
 
     
-    
     def _get_split_statistics(self):
         """
         Showing basic statistics of dataset: `shape` and `disbalance`
         """
-        for group in self._edges_mapping:
+        for group in self._bounds_mapping:
             print(self._get_statistic_per_group(group))
 
 
     def _get_statistic_per_group(self, group):
-        group_shape = self.dataset[self.dataset[self._split_col] == self._edges_mapping[group]].shape
+        group_shape = self.dataset[self.dataset[self._split_col] == self._bounds_mapping[group]].shape
         fraud_cnt = self.dataset[
-            (self.dataset[self._split_col] == self._edges_mapping[group])
+            (self.dataset[self._split_col] == self._bounds_mapping[group])
             & (self.dataset[self.target_col] == 1)
             ].shape[0]
         
         disbalance = fraud_cnt / group_shape[0] * 100
 
-        return f"{self._edges_mapping[group]}: shape is {group_shape}\nDisbalance: {disbalance:.1f}% \n"
-    
-
-    def _prepare_data_for_train(self, split_group):
-        X = (
-            self.dataset[self.dataset[self._split_col] == split_group]
-            .drop(columns=self._service_columns, errors='ignore')
-            )
-        y = self.dataset[self.dataset[self._split_col] == split_group][self.target_col]
-
-        return X, y
+        return f"{self._bounds_mapping[group]}: shape is {group_shape}\nDisbalance: {disbalance:.1f}% \n"
     
 
     def _prepare_index_for_train(self, split_group):
@@ -160,7 +132,7 @@ class DatasetRelable:
             self.dataset[self.dataset[self._split_col] == split_group]
             .index.to_numpy()
         )
-        train_columns = self.dataset.drop(columns=self._service_columns, errors='ignore').columns
+        train_columns = self.dataset.drop(columns=self._service_columns, errors='ignore').columns.tolist()
 
         return train_indexes, train_columns
 
@@ -188,152 +160,152 @@ class DatasetRelable:
         # save current model
         self._save_model(self.M_relabler, self._model_relabler_path, 'model_relabler')
 
+        # get statistics on validation subset
+        roc_auc, ap = self._model_score(self.M_relabler, 'D_control_1')
+        print(f'\nROC_AUC: {roc_auc:.5f}')
+        print(f'AP: {ap:.5f}\n')
+        print(f"Best params: {self.M_relabler.best_params_}")
 
 
-    def plot_relabler_distribution(self, bins_step=0.01, subset='D_init'):
+
+    def relabler_distribution(self, bins_step: float=0.01,
+                                    subset: list=['D_train'],
+                                    figsize: tuple=(15, 5)):
         """
         Plot distribution of `subset` data by target
+        """      
+        fig, axes = plt.subplots(1, len(subset) + 1, sharex=True, sharey=True, figsize=figsize)
+        plt.suptitle(f"Target distribution after using relabler on subsets")
+
+        for i, sub in enumerate(['D_init'] + subset):
+            inds, cols = self._prepare_index_for_train(sub)
+        
+            X = self.dataset.loc[inds, cols]
+            y = self.dataset.loc[inds, self.target_col]
+
+            y_proba = self.M_relabler.predict_proba(X)[:, 1]
+
+            data_for_plot = pd.concat([y.reset_index(drop=True), pd.Series(y_proba)], axis=1) \
+                            .set_axis([self.target_col, self._relable_score_col], axis=1)
+
+            axes[i].set_title(f"Target distribution score on '{sub}'")
+            sns.histplot(data=data_for_plot, x=self._relable_score_col,
+                        hue=self.target_col, binrange=(0, 1), binwidth=bins_step,
+                        stat='percent', common_norm=False, ax=axes[i])
+
+
+    def train_baseline(self, params: dict):
         """
-        bins_range = np.arange(0, 1 + bins_step, bins_step)
-        inds, cols = self._prepare_index_for_train(subset)
-        
-        X = self.dataset.loc[inds, cols]
-        y = self.dataset.loc[inds, self.target_col]
+        Train baseline model on 'D_train' part of dataset
+        'params' is a dict-like object with required fields:
 
-        y_proba = self.M_relabler.predict_proba(X)[:, 1]
-
-        data_for_plot = pd.concat([y.reset_index(drop=True), pd.Series(y_proba)], axis=1) \
-                          .set_axis([self.target_col, self._relable_score_col], axis=1)
-        
-        sns.displot(data_for_plot, x=self._relable_score_col,
-                    hue=self.target_col, bins=bins_range,
-                    stat='density', common_norm=False)
-
-
-
-
-    def train_base_model(self, parameters: dict,
-                               model,
-                               scoring: str='average_precision',
-                               n_jobs=None,
-                               verbose=2):
-        """
-        Train baseline model on `D_train` part of dataset without relabling
-        then validate on `D_control_1`
-        
+            - `model` - is a source model for training
+            - `parameters` - grid of parameters for searching best algorithm
+            - `scoring` - one or dict of scores
+            - `refit`
+            - `need_smote`
         """
 
         inds, cols = self._prepare_index_for_train('D_train')
 
-        # only for not preprocessed data
-        if not self._is_preprocessed:
-            model = Pipeline(
-                steps=[
-                    ('preprocessor', self.preprocessor),
-                    ('model', model)
-                ]
-            )
+        X = self.dataset.loc[inds, cols]
+        y = self.dataset.loc[inds, self.target_col]
 
-            parameters = {'model__' + key: values for key, values in parameters.items()}
-
-        M_base = GridSearchCV(estimator=model,
-                              param_grid=parameters,
-                              refit=True,
-                              scoring=scoring,
-                              cv=3,
-                              verbose=verbose,
-                              n_jobs=n_jobs
-                            ).fit(self.dataset.loc[inds, cols],
-                                  self.dataset.loc[inds, self.target_col])
-        
-        self.base_model = M_base
+        self.M_baseline = DummyModel(preprocessor=self.preprocessor.pipe, **params).fit(X, y)
 
         # save current model
-        if not os.path.exists(self._model_base_path):
-            os.makedirs(self._model_base_path)
-        dump(M_base, f"{self._model_base_path}/base_model.joblib")
+        self._save_model(self.M_baseline, self._model_baseline_path, 'model_baseline')
 
-        print(f'Scoring "{scoring}" is {M_base.best_score_}')
-        print(f'Best params: {M_base.best_params_}')
+        # get statistics on validation subset
+        roc_auc, ap = self._model_score(self.M_baseline, 'D_control_1')
+        print(f'\nROC_AUC: {roc_auc:.5f}')
+        print(f'AP: {ap:.5f}\n')
+        print(f"Best params: {self.M_baseline.best_params_}")
     
 
-
-    def train_base_relable_model(self, parameters: dict,
-                                       model,
-                                       TH_legetim: dict,
-                                       TH_fraud: dict,
-                                       scoring: str='average_precision',
-                                       n_jobs=None,
-                                       verbose=2):
+    def train_relabling(self, params: dict,
+                              TH_legetim: dict,
+                              TH_fraud: dict):
         """
         `TH_legetim` dict like {start: float, stop: float, step: float}
         `TH_fraud` dict like {start: float, stop: float, step: float}
         """
         inds, cols = self._prepare_index_for_train('D_train')
-        val_inds, _ = self._prepare_index_for_train('D_control_1')
-
-        # only for not preprocessed data
-        if not self._is_preprocessed:
-            model = Pipeline(
-                steps=[
-                    ('preprocessor', self.preprocessor),
-                    ('model', model)
-                ]
-            )
-
-            parameters = {'model__' + key: values for key, values in parameters.items()}
 
         self.TH_matrix = []
         model_number = 1
-        n_steps = len(np.arange(**TH_legetim)) * len(np.arange(**TH_fraud))
-    
-        print(f'Eproximate steps: {n_steps}')
+
+        n_steps = len(np.arange(**TH_legetim)) + len(np.arange(**TH_fraud))
+        print(f"Number od steps: {n_steps}")
 
         for TH_l in np.arange(**TH_legetim):
             for TH_f in np.arange(**TH_fraud):
-
                 print(f'Step {model_number} ... ')
-                self._change_bounds(TH_l, TH_f)
 
-                # Fit model and choose the best hyperparameters
-                M_s = GridSearchCV(estimator=model,
-                                   param_grid=parameters,
-                                   refit=True,
-                                   scoring=scoring,
-                                   cv=3,
-                                   verbose=verbose,
-                                   n_jobs=n_jobs
-                                   ).fit(self.dataset.loc[inds, cols],
-                                         self.dataset.loc[inds, self._relable_target_col])
-                
+                data =  self._change_bounds(self.dataset.loc[inds, cols + [self.target_col]], TH_l, TH_f)
+                X = data.loc[inds, cols]
+                y = data.loc[inds, self._relable_target_col]
+
+                model = DummyModel(preprocessor=self.preprocessor.pipe, **params).fit(X, y)
+
                 # save current model
-                if not os.path.exists(self._model_relabled_path):
-                    os.makedirs(self._model_relabled_path)
-                dump(M_s, f"{self._model_relabled_path}/model_relabled_{model_number}.joblib")
+                self._save_model(model, self._model_relabled_path, f'model_relabled_{model_number}')
 
-                val_score = M_s.score(self.dataset.loc[val_inds, cols], 
-                                      self.dataset.loc[val_inds, self.target_col])
+                # get statistics on validation subset
+                roc_auc, ap = self._model_score(model, 'D_control_1')
+                self.TH_matrix.append([f'model_relabled_{model_number}', TH_l, TH_f, roc_auc, ap])
 
-                self.TH_matrix.append([f'model_relabled_{model_number}', TH_l, TH_f, val_score])
                 model_number += 1
         
-        self.TH_matrix_source = pd.DataFrame(self.TH_matrix, columns=['model_name', 'TH_legetim', 'TH_fruad', f'score_{scoring}'])
-        self.TH_matrix = self.TH_matrix_source.pivot(index='TH_legetim', columns='TH_fruad', values=f'score_{scoring}')
+        # convert matrix to DataFrame
+        self.TH_matrix = pd.DataFrame(self.TH_matrix, columns=['model_name', 'TH_l', 'TH_f', 'roc_auc', 'AP'])
+
         
 
-    def _change_bounds(self, TH_l: float, TH_f: float):
-        self.dataset[self._relable_target_col] = self.dataset[self.target_col]
+    def _change_bounds(self, data, TH_l: float, TH_f: float):
+        """
+        """
+        data[self._relable_score_col] = self.M_relabler.predict_proba(data)[:, 1]
 
-        self.dataset.loc[self.dataset[self._relable_score_col] <= TH_l, self._relable_target_col] = 0
-        self.dataset.loc[self.dataset[self._relable_score_col] >= TH_f, self._relable_target_col] = 1
+        data[self._relable_target_col] = data[self.target_col]
+        data.loc[data[self._relable_score_col] <= TH_l, self._relable_target_col] = 0
+        data.loc[data[self._relable_score_col] >= TH_f, self._relable_target_col] = 1
+
+        return data
+    
+
+    def _model_score(self, model, subset):
+        val_inds, cols = self._prepare_index_for_train(subset)
+
+        X = self.dataset.loc[val_inds, cols]
+        y = self.dataset.loc[val_inds, self.target_col]
+
+        y_proba = model.predict_proba(X)[:, 1]
+        roc_auc = roc_auc_score(y, y_proba)
+        ap = average_precision_score(y, y_proba)
+
+        return roc_auc, ap
 
 
-    def plot_TH_matrix(self, cmap='BuGn'):
+
+    def plot_TH_matrix(self, cmap='BuGn', figsize: tuple=(15, 5), fmt='.3g'):
         """
         Plot heatmap based on various thresholds TH_l and TH_f after training model on relabled data `D_train`
         """
-        sns.heatmap(self.TH_matrix.sort_index(ascending=False),
-                    annot=True, cmap=cmap, fmt='.4g')
+        metrics = ['roc_auc', 'AP']
+
+        fig, axes = plt.subplots(1, len(metrics), figsize=figsize)
+
+        for i, metric in enumerate(metrics):
+            scores = self.TH_matrix.pivot(index='TH_l', columns='TH_f', values=metric)
+            sns.heatmap(scores.sort_index(ascending=False),
+                        annot=True, cmap=cmap, fmt=fmt, ax=axes[i])
+            
+            x_labels = [f'{float(label.get_text()):.2f}' for label in axes[i].xaxis.get_ticklabels()]
+            y_labels = [f'{float(label.get_text()):.2f}' for label in axes[i].yaxis.get_ticklabels()]
+
+            axes[i].set_xticklabels(x_labels)
+            axes[i].set_yticklabels(y_labels)
 
 
 
@@ -350,14 +322,18 @@ class DatasetRelable:
 
         return M_b_score
     
+
     def _save_model(self, object, path, name):
+        """
+        Save model `object` to the `path` with current `name`
+        """
         if not os.path.exists(path):
             os.makedirs(path)
         dump(object, f"{path}/{name}.joblib")
     
 
     def __str__(self):
-        cat_cols, numeric_cols = self.preprocessor.cat_cols, self.preprocessor.numeric_cols
+        cat_cols, numeric_cols = self.preprocessor.get_columns()
 
         return f"Data shape is {self.dataset.shape}, target column is '{self.target_col}'\n" +\
             f"Categorical columns: {cat_cols}\n" +\

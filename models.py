@@ -8,6 +8,7 @@ from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 
 import numpy as np
+import pandas as pd
 
 
 class Preprocessor:
@@ -57,8 +58,9 @@ class Preprocessor:
         )
 
         return preprocessor
-
-
+    
+    def get_columns(self):
+        return self.cat_cols, self.numeric_cols
 
 
 class DummyModel:
@@ -109,3 +111,33 @@ class DummyModel:
                            ).fit(X, y)
         
         return model
+    
+
+class Splitter:
+    def __init__(self, bounds,
+                       subset_names,
+                       split_strategic):
+        """
+        """
+        self.bounds = bounds
+        self.subset_names = subset_names
+        self.split_strategic = split_strategic
+
+
+    def split(self, X) -> np.ndarray:
+        if self.split_strategic == 'index':
+            splitted_col = self._index_split(X)
+
+        return splitted_col
+
+
+    def _index_split(self, data) -> np.ndarray:
+        index_bounds = (np.array(self.bounds) * data.shape[0]).astype(int)
+        splits = []
+
+        for n_group, sub_index in enumerate(np.split(data.index.to_numpy(), index_bounds)):
+            splits += [self.subset_names[n_group]] * len(sub_index)
+
+        return np.array(splits)
+    
+        
