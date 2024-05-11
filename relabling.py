@@ -5,9 +5,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 sns.set_style('darkgrid')
 
-from sklearn.neural_network import MLPClassifier
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import roc_auc_score, average_precision_score, PrecisionRecallDisplay, RocCurveDisplay
 
 from joblib import dump, load
 
@@ -161,7 +159,7 @@ class DatasetRelable:
         self._save_model(self.M_relabler, self._model_relabler_path, 'model_relabler')
 
         # get statistics on validation subset
-        roc_auc, ap = self._model_score(self.M_relabler, 'D_control_1')
+        roc_auc, ap = self._model_scores(self.M_relabler, 'D_control_1')
         print(f'\nROC_AUC: {roc_auc:.5f}')
         print(f'AP: {ap:.5f}\n')
         print(f"Best params: {self.M_relabler.best_params_}")
@@ -217,7 +215,7 @@ class DatasetRelable:
         self._save_model(self.M_baseline, self._model_baseline_path, 'model_baseline')
 
         # get statistics on validation subset
-        roc_auc, ap = self._model_score(self.M_baseline, 'D_control_1')
+        roc_auc, ap = self._model_scores(self.M_baseline, 'D_control_1')
         print(f'\nROC_AUC: {roc_auc:.5f}')
         print(f'AP: {ap:.5f}\n')
         print(f"Best params: {self.M_baseline.best_params_}")
@@ -235,7 +233,7 @@ class DatasetRelable:
         self.TH_matrix = []
         model_number = 1
 
-        n_steps = len(np.arange(**TH_legetim)) + len(np.arange(**TH_fraud))
+        n_steps = len(np.arange(**TH_legetim)) * len(np.arange(**TH_fraud))
         print(f"Number od steps: {n_steps}")
 
         for TH_l in np.arange(**TH_legetim):
@@ -252,7 +250,7 @@ class DatasetRelable:
                 self._save_model(model, self._model_relabled_path, f'model_relabled_{model_number}')
 
                 # get statistics on validation subset
-                roc_auc, ap = self._model_score(model, 'D_control_1')
+                roc_auc, ap = self._model_scores(model, 'D_control_1')
                 self.TH_matrix.append([f'model_relabled_{model_number}', TH_l, TH_f, roc_auc, ap])
 
                 model_number += 1
@@ -274,7 +272,7 @@ class DatasetRelable:
         return data
     
 
-    def _model_score(self, model, subset):
+    def _model_scores(self, model, subset):
         val_inds, cols = self._prepare_index_for_train(subset)
 
         X = self.dataset.loc[val_inds, cols]
@@ -285,7 +283,37 @@ class DatasetRelable:
         ap = average_precision_score(y, y_proba)
 
         return roc_auc, ap
+    
+    def scores_curve_display(self, model: str='relabler',
+                                   subset='D_control_1',
+                                   figsize: tuple=(15, 5)):
+        """
+        `model`: 2 pissible values:
+            - 'relabler'
+            - 'baseline'
+        """
+        val_inds, cols = self._prepare_index_for_train(subset)
 
+        X = self.dataset.loc[val_inds, cols]
+        y = self.dataset.loc[val_inds, self.target_col]
+
+        if model == 'relabler':
+            model_ = self.M_relabler
+        elif model == 'baseline':
+            model_ = self.M_baseline
+
+        y_proba = model_.predict_proba(X)[:, 1]
+
+        fig, axes = plt.subplots(1, 2, figsize=figsize)
+        plt.suptitle(f"Scores curves for '{model}' on '{subset}'")
+
+        PR_curve = PrecisionRecallDisplay.from_predictions(y, y_proba, name=model, plot_chance_level=True, ax=axes[0])
+        ROC_curve = RocCurveDisplay.from_predictions(y, y_proba, name=model, plot_chance_level=True, ax=axes[1])
+        axes[0].legend(loc='upper right')
+        axes[1].legend(loc='lower right')
+
+        axes[0].set_title("Precision-Recall curve")
+        axes[1].set_title("ROC-AUC curve")
 
 
     def plot_TH_matrix(self, cmap='BuGn', figsize: tuple=(15, 5), fmt='.3g'):
