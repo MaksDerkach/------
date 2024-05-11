@@ -166,9 +166,9 @@ class DatasetRelable:
 
 
 
-    def relabler_distribution(self, bins_step: float=0.01,
-                                    subset: list=['D_train'],
-                                    figsize: tuple=(15, 5)):
+    def plot_distribution(self, bins_step: float=0.01,
+                                subset: list=['D_train'],
+                                figsize: tuple=(15, 5)):
         """
         Plot distribution of `subset` data by target
         """      
@@ -256,7 +256,7 @@ class DatasetRelable:
                 model_number += 1
         
         # convert matrix to DataFrame
-        self.TH_matrix = pd.DataFrame(self.TH_matrix, columns=['model_name', 'TH_l', 'TH_f', 'roc_auc', 'AP'])
+        self.TH_matrix = pd.DataFrame(self.TH_matrix, columns=['model_name', 'TH_l', 'TH_f', 'ROC_AUC', 'AP'])
 
         
 
@@ -320,9 +320,10 @@ class DatasetRelable:
         """
         Plot heatmap based on various thresholds TH_l and TH_f after training model on relabled data `D_train`
         """
-        metrics = ['roc_auc', 'AP']
+        metrics = ['ROC_AUC', 'AP']
 
         fig, axes = plt.subplots(1, len(metrics), figsize=figsize)
+        plt.suptitle('Main metrics with different thresholds')
 
         for i, metric in enumerate(metrics):
             scores = self.TH_matrix.pivot(index='TH_l', columns='TH_f', values=metric)
@@ -335,20 +336,37 @@ class DatasetRelable:
             axes[i].set_xticklabels(x_labels)
             axes[i].set_yticklabels(y_labels)
 
+            axes[i].set_title(f'TH matrix for {metric}')
 
 
-    def compare_models(self):
+
+    def compare_models(self, main_metric, subset='D_control_2'):
         """
-        Compare statistics of M_b and M_s models on `D_control_2` subset
+        Compare statistics of M_b and M_s models on `subset`. Default subset='D_control_2'
+
+        `main_metric`: two possible values:
+            - 'AP'
+            - 'ROC_AUC'
         """
+        model_to_compare, TH_l, TH_f = self._choose_best(main_metric)
 
-        val_inds, cols = self._prepare_index_for_train('D_control_2')
+        for model, descr in zip([self.M_baseline, model_to_compare],
+                                ['Baseline', f'Baseline with TH_l={TH_l:.3f} and TH_f={TH_f:.3f}']):
+            roc_auc, ap = self._model_scores(model, subset)
 
-        model_M_b = self.base_model
-        M_b_prediction = model_M_b.predict_proba(self.dataset.loc[val_inds, cols])[:, 1]
-        M_b_score = roc_auc_score(self.dataset.loc[val_inds, self.target_col], M_b_prediction)
+            print(f"Model: {descr}")
+            print(f'ROC_AUC: {roc_auc:.5f}')
+            print(f'AP: {ap:.5f}\n')
 
-        return M_b_score
+
+
+    def _choose_best(self, metric) -> tuple:
+        best_result = self.TH_matrix.sort_values(metric, ascending=False).head(1)
+
+        TH_l, TH_f = best_result.TH_l.values[0], best_result.TH_f.values[0]
+        best_model = load(self._model_relabled_path + f'/{best_result.model_name.values[0]}.joblib')
+
+        return best_model, TH_l, TH_f
     
 
     def _save_model(self, object, path, name):

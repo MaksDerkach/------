@@ -13,21 +13,39 @@ import pandas as pd
 
 class Preprocessor:
     def __init__(self, data):
+        """
+        `Preprocessor` allows you to sequentially apply a list of transformers 
+        to preprocess the data with numerical and categorical features using sklearn's `Pipeline` and `ColumnTransformer`.
+
+        Parameters
+        ----------
+
+        `data` : pd.DataFrame of shape (n_samples, n_features)
+            The input data to preprocess.
+        """
 
         self.cat_cols, self.numeric_cols = self._auto_select_dtypes(data)
         self.pipe = self._preprocess_data(self.cat_cols, self.numeric_cols)
 
 
-    def _auto_select_dtypes(self, X) -> list:
+    def _auto_select_dtypes(self, data):
         """
         Automatic selection of data types for numeric and categorical columns
 
-        return cat_col, numeric_cols
+        Parameters
+        ----------
+        `data` : pd.DataFrame of shape (n_samples, n_features)
+            The input data to preprocess.
+
+        Returns
+        -------
+        `cat_cols` : list
+        `numeric_cols` : list
         """
         cat_cols = []
         numeric_cols = []     
 
-        for col_name, dtype in X.dtypes.items():
+        for col_name, dtype in data.dtypes.items():
             if type(dtype) in [np.dtypes.Int64DType, np.dtypes.Float64DType]:
                 numeric_cols.append(col_name)
 
@@ -40,6 +58,18 @@ class Preprocessor:
     def _preprocess_data(self, cat_cols, numeric_cols):
         """
         Preprocess the data with numeric and categorical values
+
+        Parameters
+        ----------
+        `cat_cols` : list
+            List of categorical column names
+
+        `numeric_cols` : list
+            List of numeric column names
+
+        Returns
+        -------
+        `preprocessor`
         """
         numeric_transform = Pipeline(
             steps=[('imputer', SimpleImputer(strategy='median')),
@@ -59,7 +89,16 @@ class Preprocessor:
 
         return preprocessor
     
+
     def get_columns(self):
+        """
+        Get lists of categorical and numeric columns in dataframe.
+
+        Returns
+        -------
+        `cat_cols` : list
+        `numeric_cols` : list
+        """
         return self.cat_cols, self.numeric_cols
 
 
