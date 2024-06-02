@@ -68,7 +68,20 @@ class DatasetRelable:
             self.preprocessor = Preprocessor(self.dataset.drop(columns=self._service_columns, errors='ignore'))
     
 
-    def split_data(self, bounds: list=[0.3, 0.533, 0.766]):
+    def split_data(self, bounds: list=[0.3, 0.533, 0.766], show_split=False):
+        """
+        Split the data into 4 groups: D_init, D_train, D_control_1, D_control_2.
+        Then display basic statistics of dataset: `shape` and `disbalance` for each subset.
+
+        Parameters
+        ----------
+        `bounds` : list
+            the boundaries along which the data will be sliced
+
+        `show_split` : bool
+            the parameter responsible for whether to show the data after slicing
+        """
+
         if self.time_col is not None:
             self.dataset = self.dataset.sort_values(self.time_col, ascending=True).reset_index(drop=True)
             strategic = 'index'
@@ -76,18 +89,25 @@ class DatasetRelable:
         self.dataset[self._split_col] = Splitter(bounds, self._bounds_mapping, strategic).split(self.dataset) 
 
         # show statistic per subset
-        self._get_split_statistics()       
+        self._get_split_statistics()
+
+        if show_split:
+            self._show_splits()
 
 
-    def show_splits(self, split_edges: list=[0.3, 0.533, 0.766], n_ticks=10):
+    def _show_splits(self, n_ticks=10):
         """
         Plot the graph (if `time_col` is not empty) of splitted dataset
         """
         if self.time_col is not None:
+            plt.figure(figsize=(12, 4))
+
             if self.time_col_type == 'int':
                 sns.histplot(self.dataset, x=self.time_col,
                              bins=self.dataset.shape[0] // 1000,
-                             hue=self._split_col)
+                             hue=self._split_col, multiple="stack")
+                plt.title('Splitted data into 4 groups')
+                plt.ylabel('Number of samples')
                 
             elif self.time_col_type == 'datetime':
                 data_for_plot = self.dataset[[self.time_col, self._split_col, self.target_col]]
@@ -107,32 +127,34 @@ class DatasetRelable:
     
     def _get_split_statistics(self):
         """
-        Showing basic statistics of dataset: `shape` and `disbalance`
+        Showing basic statistics of dataset: `shape` and `disbalance` for each subset
         """
         for group in self._bounds_mapping:
             print(self._get_statistic_per_group(group))
 
 
     def _get_statistic_per_group(self, group):
+        """
+        Showing basic statistics of dataset: `shape` and `disbalance`
+        """
         group_shape = self.dataset[self.dataset[self._split_col] == self._bounds_mapping[group]].shape
         fraud_cnt = self.dataset[
             (self.dataset[self._split_col] == self._bounds_mapping[group])
             & (self.dataset[self.target_col] == 1)
             ].shape[0]
-        
-        disbalance = fraud_cnt / group_shape[0] * 100
 
-        return f"{self._bounds_mapping[group]}: shape is {group_shape}\nDisbalance: {disbalance:.1f}% \n"
+        return f"{self._bounds_mapping[group]}: shape is {group_shape};" +\
+               f" {(group_shape[0] / self.dataset.shape[0] * 100):.1f}% of dataset" +\
+               f"\nDisbalance: {(fraud_cnt / group_shape[0] * 100):.1f}% \n"
     
 
-    def _prepare_index_for_train(self, split_group):
-        train_indexes = (
+    def _prepare_index(self, split_group):
+        indexes = (
             self.dataset[self.dataset[self._split_col] == split_group]
             .index.to_numpy()
         )
-        train_columns = self.dataset.drop(columns=self._service_columns, errors='ignore').columns.tolist()
-
-        return train_indexes, train_columns
+        columns = self.dataset.drop(columns=self._service_columns, errors='ignore').columns.tolist()
+        return indexes, columns
 
 
 
@@ -148,7 +170,7 @@ class DatasetRelable:
             - `need_smote`
         """
 
-        inds, cols = self._prepare_index_for_train('D_init')
+        inds, cols = self._prepare_index('D_init')
 
         X = self.dataset.loc[inds, cols]
         y = self.dataset.loc[inds, self.target_col]
@@ -166,17 +188,22 @@ class DatasetRelable:
 
 
 
-    def plot_distribution(self, bins_step: float=0.01,
-                                subset: list=['D_train'],
-                                figsize: tuple=(15, 5)):
+    def relabler_distribution(self, bins_step: float=0.01,
+                                    subsets: list=['D_train'],
+                                    figsize: tuple=(15, 5)):
         """
-        Plot distribution of `subset` data by target
+        Plot distribution of `subsets` data by target
+
+        Parameters
+        ----------
+        `bin_step`
+        `subset`
         """      
-        fig, axes = plt.subplots(1, len(subset) + 1, sharex=True, sharey=True, figsize=figsize)
+        _, axes = plt.subplots(1, len(subsets), sharex=True, figsize=figsize)
         plt.suptitle(f"Target distribution after using relabler on subsets")
 
-        for i, sub in enumerate(['D_init'] + subset):
-            inds, cols = self._prepare_index_for_train(sub)
+        for i, sub in enumerate(subsets):
+            inds, cols = self._prepare_index(sub)
         
             X = self.dataset.loc[inds, cols]
             y = self.dataset.loc[inds, self.target_col]
@@ -184,12 +211,15 @@ class DatasetRelable:
             y_proba = self.M_relabler.predict_proba(X)[:, 1]
 
             data_for_plot = pd.concat([y.reset_index(drop=True), pd.Series(y_proba)], axis=1) \
-                            .set_axis([self.target_col, self._relable_score_col], axis=1)
-
-            axes[i].set_title(f"Target distribution score on '{sub}'")
+                              .set_axis([self.target_col, self._relable_score_col], axis=1)
+            
             sns.histplot(data=data_for_plot, x=self._relable_score_col,
-                        hue=self.target_col, binrange=(0, 1), binwidth=bins_step,
-                        stat='percent', common_norm=False, ax=axes[i])
+                         hue=self.target_col, binrange=(0, 1), binwidth=bins_step,
+                         stat='percent', common_norm=False, ax=axes[i])
+            
+            y_labels = [f'{float(label.get_text())}%' for label in axes[i].yaxis.get_ticklabels()]
+            axes[i].set_yticklabels(y_labels)
+            axes[i].set_title(f"Target distribution score on '{sub}'")
 
 
     def train_baseline(self, params: dict):
@@ -204,7 +234,7 @@ class DatasetRelable:
             - `need_smote`
         """
 
-        inds, cols = self._prepare_index_for_train('D_train')
+        inds, cols = self._prepare_index('D_train')
 
         X = self.dataset.loc[inds, cols]
         y = self.dataset.loc[inds, self.target_col]
@@ -228,7 +258,7 @@ class DatasetRelable:
         `TH_legetim` dict like {start: float, stop: float, step: float}
         `TH_fraud` dict like {start: float, stop: float, step: float}
         """
-        inds, cols = self._prepare_index_for_train('D_train')
+        inds, cols = self._prepare_index('D_train')
 
         self.TH_matrix = []
         model_number = 1
@@ -273,7 +303,7 @@ class DatasetRelable:
     
 
     def _model_scores(self, model, subset):
-        val_inds, cols = self._prepare_index_for_train(subset)
+        val_inds, cols = self._prepare_index(subset)
 
         X = self.dataset.loc[val_inds, cols]
         y = self.dataset.loc[val_inds, self.target_col]
@@ -284,39 +314,47 @@ class DatasetRelable:
 
         return roc_auc, ap
     
-    def scores_curve_display(self, model: str='relabler',
-                                   subset='D_control_1',
+    def scores_curve_display(self, model: str,
+                                   test_subset: str,
+                                   train_subset: str=None,
                                    figsize: tuple=(15, 5)):
         """
         `model`: 2 pissible values:
             - 'relabler'
             - 'baseline'
         """
-        val_inds, cols = self._prepare_index_for_train(subset)
+        names = ['train', 'test']
 
-        X = self.dataset.loc[val_inds, cols]
-        y = self.dataset.loc[val_inds, self.target_col]
-
-        if model == 'relabler':
-            model_ = self.M_relabler
-        elif model == 'baseline':
+        if model == 'Relabler':
+                model_ = self.M_relabler
+        elif model == 'Baseline':
             model_ = self.M_baseline
 
-        y_proba = model_.predict_proba(X)[:, 1]
+        _, axes = plt.subplots(1, 2, figsize=figsize)
+        plt.suptitle(f"Scores curves for '{model}'")
 
-        fig, axes = plt.subplots(1, 2, figsize=figsize)
-        plt.suptitle(f"Scores curves for '{model}' on '{subset}'")
+        for name, subset in zip(names, [train_subset, test_subset]):
 
-        PR_curve = PrecisionRecallDisplay.from_predictions(y, y_proba, name=model, plot_chance_level=True, ax=axes[0])
-        ROC_curve = RocCurveDisplay.from_predictions(y, y_proba, name=model, plot_chance_level=True, ax=axes[1])
-        axes[0].legend(loc='upper right')
-        axes[1].legend(loc='lower right')
+            inds, cols = self._prepare_index(subset)
+            X = self.dataset.loc[inds, cols]
+            y = self.dataset.loc[inds, self.target_col]
+            y_proba = model_.predict_proba(X)[:, 1]
 
-        axes[0].set_title("Precision-Recall curve")
-        axes[1].set_title("ROC-AUC curve")
+            for i, data in enumerate(zip([PrecisionRecallDisplay, RocCurveDisplay],
+                                         ['best', 'lower right'],
+                                         ["Precision-Recall curve", "ROC-AUC curve"])):
+                
+                metric_curve, position, title = data
+                __ = metric_curve.from_predictions(y, y_proba,
+                                                   name=f'{name} ({subset})',
+                                                   plot_chance_level=True if subset == test_subset else False,
+                                                   ax=axes[i])
+
+                axes[i].legend(loc=f'{position}')
+                axes[i].set_title(title)
 
 
-    def plot_TH_matrix(self, cmap='BuGn', figsize: tuple=(15, 5), fmt='.3g'):
+    def plot_TH_matrix(self, cmap='BuGn', figsize: tuple=(15, 5), fmt='.3g', fontsize=10):
         """
         Plot heatmap based on various thresholds TH_l and TH_f after training model on relabled data `D_train`
         """
@@ -328,7 +366,8 @@ class DatasetRelable:
         for i, metric in enumerate(metrics):
             scores = self.TH_matrix.pivot(index='TH_l', columns='TH_f', values=metric)
             sns.heatmap(scores.sort_index(ascending=False),
-                        annot=True, cmap=cmap, fmt=fmt, ax=axes[i])
+                        annot=True, cmap=cmap, fmt=fmt, ax=axes[i],
+                        annot_kws={"fontsize":fontsize})
             
             x_labels = [f'{float(label.get_text()):.2f}' for label in axes[i].xaxis.get_ticklabels()]
             y_labels = [f'{float(label.get_text()):.2f}' for label in axes[i].yaxis.get_ticklabels()]
@@ -381,8 +420,15 @@ class DatasetRelable:
     def __str__(self):
         cat_cols, numeric_cols = self.preprocessor.get_columns()
 
-        return f"Data shape is {self.dataset.shape}, target column is '{self.target_col}'\n" +\
-            f"Categorical columns: {cat_cols}\n" +\
-            f"Numeric columns: {numeric_cols}\n" +\
-            f"Time column is '{self.time_col}'\n"
+        fraud_cnt = self.dataset[(self.dataset[self.target_col] == 1)].shape[0]
+        disbalance = fraud_cnt / self.dataset.shape[0] * 100
 
+        return f"Data shape is {self.dataset.shape}, target column is '{self.target_col}'\n" +\
+            f"Time column is '{self.time_col}'\n" +\
+            f"Disbalance is {disbalance:.3f}%\n\n" +\
+            "#" * 30 + '\n' +\
+            f"Number of categorical columns is {len(cat_cols)}\n" +\
+            f"Number of numeric columns is {len(numeric_cols)}\n" +\
+            "#" * 30 + '\n\n' +\
+            f"Categorical columns: {cat_cols}\n" +\
+            f"Numeric columns: {numeric_cols}"

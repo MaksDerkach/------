@@ -107,6 +107,7 @@ class DummyModel:
                        parameters,
                        preprocessor,
                        scoring,
+                       cv_strategic,
                        refit=True,
                        needs_smote=True,
                        n_jobs=None,
@@ -117,6 +118,7 @@ class DummyModel:
         self.parameters = {'model__' + key: values for key, values in parameters.items()}
         self.preprocessor = preprocessor
         self.scoring = scoring
+        self.cv_strategic = cv_strategic
 
         self.refit = refit
         self.needs_smote = needs_smote
@@ -144,7 +146,7 @@ class DummyModel:
                             param_grid=self.parameters,
                             refit=self.refit,
                             scoring=self.scoring,
-                            cv=3,
+                            cv=self.cv_strategic,
                             verbose=self.verbose,
                             n_jobs=self.n_jobs
                            ).fit(X, y)
