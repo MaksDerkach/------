@@ -2,7 +2,7 @@ from imblearn.pipeline import Pipeline as Pipeline_imb
 from imblearn.over_sampling import SMOTE
 from sklearn.model_selection import GridSearchCV
 
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, MinMaxScaler
 from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -73,7 +73,7 @@ class Preprocessor:
         """
         numeric_transform = Pipeline(
             steps=[('imputer', SimpleImputer(strategy='median')),
-                   ('scaler', StandardScaler())]
+                   ('scaler', MinMaxScaler())]
         )
 
         categorical_transform = Pipeline(

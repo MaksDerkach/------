@@ -154,9 +154,9 @@ class DatasetRelable:
                f"\nDisbalance: {(fraud_cnt / group_shape[0] * 100):.1f}% \n"
     
 
-    def _prepare_index(self, split_group):
+    def _prepare_index(self, subset):
         indexes = (
-            self.dataset[self.dataset[self._split_col] == split_group]
+            self.dataset[self.dataset[self._split_col] == subset]
             .index.to_numpy()
         )
         columns = self.dataset.drop(columns=self._service_columns, errors='ignore').columns.tolist()
@@ -315,10 +315,10 @@ class DatasetRelable:
     
 
     def _model_scores(self, model, subset):
-        val_inds, cols = self._prepare_index(subset)
+        inds, cols = self._prepare_index(subset)
 
-        X = self.dataset.loc[val_inds, cols]
-        y = self.dataset.loc[val_inds, self.target_col]
+        X = self.dataset.loc[inds, cols]
+        y = self.dataset.loc[inds, self.target_col]
 
         y_proba = model.predict_proba(X)[:, 1]
         roc_auc = roc_auc_score(y, y_proba)
