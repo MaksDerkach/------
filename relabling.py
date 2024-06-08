@@ -261,7 +261,9 @@ class DatasetRelable:
 
     def train_matrix(self, params: dict,
                               TH_legetim: dict,
-                              TH_fraud: dict):
+                              TH_fraud: dict,
+                              n_val_epochs=3, 
+                              is_validate=True):
         """
         `TH_legetim` dict like {start: float, stop: float, step: float}
         `TH_fraud` dict like {start: float, stop: float, step: float}
@@ -279,21 +281,27 @@ class DatasetRelable:
                 print(f'Step {model_number} ... ')
 
                 data = self._change_bounds(self.dataset.loc[inds, cols + [self.target_col]], TH_l, TH_f)
-                X = data.loc[inds, cols]
-                y = data.loc[inds, self._relable_target_col]
+                X = data.loc[:, cols]
+                y = data.loc[:, self._relable_target_col]
 
                 disbalance = y.sum() / y.count()
-                model = DummyModel(preprocessor=self.preprocessor.pipe, **params).fit(X, y)
+                roc_auc_list, ap_list = [], []
 
-                # get statistics on validation subset
-                if (TH_l == 0) and (TH_f == 1):
-                    model = self.M_baseline
-                
+                # train models, then get average statistics
+                for _ in range(n_val_epochs):
+                    
+                    model = DummyModel(preprocessor=self.preprocessor.pipe, **params).fit(X, y)
+                    roc_auc, ap = self._model_scores(model, 'D_control_1')
+
+                    roc_auc_list.append(roc_auc)
+                    ap_list.append(ap)
+
+
+                mean_roc_auc, mean_ap = np.mean(roc_auc_list), np.mean(ap_list)    
+
                 # save current model
                 self._save_model(model, self._model_relabled_path, f'model_relabled_{model_number}')
-
-                roc_auc, ap = self._model_scores(model, 'D_control_1')
-                self.TH_matrix.append([f'model_relabled_{model_number}', TH_l, TH_f, roc_auc, ap, disbalance])
+                self.TH_matrix.append([f'model_relabled_{model_number}', TH_l, TH_f, mean_roc_auc, mean_ap, disbalance])
 
                 model_number += 1
         
