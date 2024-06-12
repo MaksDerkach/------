@@ -72,6 +72,13 @@ class DatasetRelable:
         if not self._is_preprocessed:
             self.preprocessor = Preprocessor(self.dataset.drop(columns=self._service_columns, errors='ignore'))
     
+    def _skrew_up_markup(self, subsets=['D_init', 'D_train'], size=0.05):
+        for subset in subsets:
+            n_samples = self.dataset[self.dataset[self._split_col] == subset][self.target_col].sum() * size
+            index_to_skrew = self.dataset[self.dataset[self._split_col] == subset].sample(int(n_samples)).index()
+
+            self.dataset.iloc[index_to_skrew, self.target_col] = 0
+    
 
     def split_data(self, bounds: list=[0.3, 0.533, 0.766], show_split=False):
         """
@@ -207,7 +214,8 @@ class DatasetRelable:
 
     def relabler_distribution(self, bins_step: float=0.01,
                                     subsets: list=['D_train'],
-                                    figsize: tuple=(15, 5)):
+                                    figsize: tuple=(15, 5),
+                                    mm_scaler=False):
         """
         Plot distribution of `subsets` data by target
 
@@ -226,6 +234,9 @@ class DatasetRelable:
             y = self.dataset.loc[inds, self.target_col]
 
             y_proba = self.M_relabler.predict_proba(X)[:, 1]
+
+            if mm_scaler:
+                y_proba = (y_proba - y_proba.min(axis=0)) / (y_proba.max(axis=0) - y_proba.min(axis=0))
 
             data_for_plot = pd.concat([y.reset_index(drop=True), pd.Series(y_proba)], axis=1) \
                               .set_axis([self.target_col, self._relable_score_col], axis=1)
@@ -275,7 +286,8 @@ class DatasetRelable:
                            TH_legetim: dict,
                            TH_fraud: dict,
                            metrics=['average_precision'],
-                           n_steps=3):
+                           n_steps=3, 
+                           mm_scaler=False):
         """
         `TH_legetim` dict like {start: float, stop: float, step: float}
         `TH_fraud` dict like {start: float, stop: float, step: float}
@@ -302,7 +314,7 @@ class DatasetRelable:
             for TH_f in np.arange(**TH_fraud):
                 print(f'Step {model_number} ... ')
 
-                data = self._change_bounds(self.dataset.loc[inds, cols + [self.target_col]], TH_l, TH_f)
+                data = self._change_bounds(self.dataset.loc[inds, cols + [self.target_col]], TH_l, TH_f, mm_scaler)
                 X = data[cols]
                 y = data[self._relable_target_col]
 
@@ -334,10 +346,15 @@ class DatasetRelable:
 
         
 
-    def _change_bounds(self, data, TH_l: float, TH_f: float):
+    def _change_bounds(self, data, TH_l: float, TH_f: float, mm_scaler=False):
         """
         """
-        data[self._relable_score_col] = self.M_relabler.predict_proba(data)[:, 1]
+        proba = self.M_relabler.predict_proba(data)[:, 1]
+
+        if mm_scaler:
+            proba = (proba - proba.min(axis=0)) / (proba.max(axis=0) - proba.min(axis=0))
+
+        data[self._relable_score_col] = proba
 
         data[self._relable_target_col] = data[self.target_col]
         data.loc[data[self._relable_score_col] <= TH_l, self._relable_target_col] = 0
