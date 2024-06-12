@@ -14,6 +14,11 @@ from models import Preprocessor, DummyModel, Splitter
 import os
 import shutil
 
+METRICS = {
+    'average_precision': average_precision_score,
+    'roc_auc': roc_auc_score
+}
+
 
 class DatasetRelable:
     def __init__(self, dataset: pd.DataFrame,
@@ -164,16 +169,21 @@ class DatasetRelable:
 
 
 
-    def train_relabler(self, params: dict):
+    def train_relabler(self, params: dict, metrics=['average_precision', 'roc_auc']):
         """
         Train model-relabler on 'D_init' part of dataset
-        'params' is a dict-like object with required fields:
 
-            - `model` - is a source model for training
-            - `parameters` - grid of parameters for searching best algorithm
-            - `scoring` - one or dict of scores
-            - `refit`
-            - `need_smote`
+        Parameters
+        ----------
+        `params` is a dict-like object with required fields:
+
+            - 'model' - is a source model for training
+            - 'parameters' - grid of parameters for searching best algorithm
+            - 'scoring' - one or dict of scores
+            - 'refit'
+            - 'need_smote'
+        
+        `metric` 
         """
 
         inds, cols = self._prepare_index('D_init')
@@ -187,10 +197,11 @@ class DatasetRelable:
         self._save_model(self.M_relabler, self._model_relabler_path, 'model_relabler')
 
         # get statistics on validation subset
-        roc_auc, ap = self._model_scores(self.M_relabler, 'D_control_1')
-        print(f'\nROC_AUC: {roc_auc:.5f}')
-        print(f'AP: {ap:.5f}\n')
-        print(f"Best params: {self.M_relabler.best_params_}")
+        scores = self._model_scores(self.M_relabler, 'D_control_1', metrics)
+
+        for score, value in scores.items():
+            print(f'{score}: {value:.5f}')
+        print(f"\nBest params: {self.M_relabler.best_params_}")
 
 
 
@@ -230,7 +241,7 @@ class DatasetRelable:
             axes[i].set_ylabel('Percent of data, %')
 
 
-    def train_baseline(self, params: dict):
+    def train_baseline(self, params: dict, metrics=['average_precision', 'roc_auc']):
         """
         Train baseline model on 'D_train' part of dataset
         'params' is a dict-like object with required fields:
@@ -253,60 +264,73 @@ class DatasetRelable:
         self._save_model(self.M_baseline, self._model_baseline_path, 'model_baseline')
 
         # get statistics on validation subset
-        roc_auc, ap = self._model_scores(self.M_baseline, 'D_control_1')
-        print(f'\nROC_AUC: {roc_auc:.5f}')
-        print(f'AP: {ap:.5f}\n')
-        print(f"Best params: {self.M_baseline.best_params_}")
+        scores = self._model_scores(self.M_baseline, 'D_control_1', metrics)
+
+        for score, value in scores.items():
+            print(f'{score}: {value:.5f}')
+        print(f"\nBest params: {self.M_baseline.best_params_}")
     
 
     def train_matrix(self, params: dict,
-                              TH_legetim: dict,
-                              TH_fraud: dict,
-                              n_val_epochs=3, 
-                              is_validate=True):
+                           TH_legetim: dict,
+                           TH_fraud: dict,
+                           metrics=['average_precision'],
+                           n_steps=3):
         """
         `TH_legetim` dict like {start: float, stop: float, step: float}
         `TH_fraud` dict like {start: float, stop: float, step: float}
+        `metrics`
+        `n_steps`
         """
+        # create new directory or delete the previous one
+        if not os.path.exists(self._model_relabled_path):
+            os.makedirs(self._model_relabled_path)
+        else:
+            shutil.rmtree(self._model_relabled_path)
+            os.makedirs(self._model_relabled_path)
+
+
         inds, cols = self._prepare_index('D_train')
 
         self.TH_matrix = []
         model_number = 1
 
-        n_steps = len(np.arange(**TH_legetim)) * len(np.arange(**TH_fraud))
-        print(f"Number od steps: {n_steps}")
+        n_epochs = len(np.arange(**TH_legetim)) * len(np.arange(**TH_fraud))
+        print(f"Number od steps: {n_epochs}")
 
         for TH_l in np.arange(**TH_legetim):
             for TH_f in np.arange(**TH_fraud):
                 print(f'Step {model_number} ... ')
 
                 data = self._change_bounds(self.dataset.loc[inds, cols + [self.target_col]], TH_l, TH_f)
-                X = data.loc[:, cols]
-                y = data.loc[:, self._relable_target_col]
+                X = data[cols]
+                y = data[self._relable_target_col]
 
                 disbalance = y.sum() / y.count()
-                roc_auc_list, ap_list = [], []
-
+                
                 # train models, then get average statistics
-                for _ in range(n_val_epochs):
+                for step in range(n_steps):
+                    matrix_row = {
+                        'model_name': f'model_relabled_{model_number}_{step}',
+                        'threshold': model_number,
+                        'TH_l': TH_l,
+                        'TH_f': TH_f,
+                        'disbalance': disbalance
+                    }
                     
                     model = DummyModel(preprocessor=self.preprocessor.pipe, **params).fit(X, y)
-                    roc_auc, ap = self._model_scores(model, 'D_control_1')
 
-                    roc_auc_list.append(roc_auc)
-                    ap_list.append(ap)
-
-
-                mean_roc_auc, mean_ap = np.mean(roc_auc_list), np.mean(ap_list)    
-
-                # save current model
-                self._save_model(model, self._model_relabled_path, f'model_relabled_{model_number}')
-                self.TH_matrix.append([f'model_relabled_{model_number}', TH_l, TH_f, mean_roc_auc, mean_ap, disbalance])
+                    for subset, prefix in zip(['D_control_1', 'D_control_2'], ['dc1', 'dc2']):
+                        scores = self._model_scores(model, subset, metrics)
+                        for score, value in scores.items():
+                            matrix_row |= {f'{score}_{prefix}': value}
+                    
+                    self.TH_matrix.append(matrix_row)
 
                 model_number += 1
         
         # convert matrix to DataFrame
-        self.TH_matrix = pd.DataFrame(self.TH_matrix, columns=['model_name', 'TH_l', 'TH_f', 'ROC_AUC', 'AP', 'Disbalance'])
+        self.TH_matrix = pd.DataFrame(self.TH_matrix)
 
         
 
@@ -322,18 +346,31 @@ class DatasetRelable:
         return data
     
 
-    def _model_scores(self, model, subset):
+    def _model_scores(self, model, subset, metrics):
+        """
+        Parameters
+        ----------
+
+        Returns
+        -------
+
+        """
+        scores = {}
+
         inds, cols = self._prepare_index(subset)
 
         X = self.dataset.loc[inds, cols]
         y = self.dataset.loc[inds, self.target_col]
 
         y_proba = model.predict_proba(X)[:, 1]
-        roc_auc = roc_auc_score(y, y_proba)
-        ap = average_precision_score(y, y_proba)
 
-        return roc_auc, ap
+        for metric in metrics:
+            metric_score = METRICS[metric](y, y_proba)
+            scores[metric] = metric_score
+
+        return scores
     
+
     def display_model_curves(self, model: str,
                                    test_subset: str,
                                    train_subset: str=None,
@@ -375,46 +412,49 @@ class DatasetRelable:
                 axes[i].set_title(title)
 
 
-    def plot_TH_matrix(self, cmaps=['BuGn', 'RdYlGn'], figsize: tuple=(15, 5),
-                       fmt: list=['.3f', '.3f'], with_relative: bool=False):
+    def plot_TH_matrix(self, cmap='BuGn', annot=True, metric='average_precision',
+                             figsize: tuple=(15, 5), fmt='.2f', compare_line=False):
         """
         Plot heatmap based on various thresholds TH_l and TH_f after training model on relabled data `D_train`
         """
-        title = 'Main metrics with different thresholds'
-        title_relative = 'Difference of metrics between model with relabling and Baseline'
+        title = f"Distribution of '{metric}' with different thresholds"
 
-        self._plot_TH_matrix([0, 0], cmaps[0], False, title, figsize, fmt)
-        
-        if with_relative:
-            relative_values = self._model_scores(self.M_baseline, 'D_control_1')[::-1]
-            self._plot_TH_matrix(relative_values, cmaps[1], True, title_relative, figsize, fmt)
-
-
-    def _plot_TH_matrix(self, relative_values: list, cmap, is_relative, title, figsize, fmt):
-        """
-        """
-        metrics = ['AP', 'ROC_AUC']
-
-        _, axes = plt.subplots(1, len(metrics), figsize=figsize)
+        mosaic = 'AB;CC' if compare_line else 'AB'
+        fig, axes = plt.subplot_mosaic(mosaic=mosaic, figsize=figsize)
         plt.suptitle(title)
 
-        for i, metric in enumerate(metrics):
-            scores = self.TH_matrix.pivot(index='TH_l', columns='TH_f', values=metric) - relative_values[i]
+        add_metric_agg =  {col: 'mean' for col in self.TH_matrix.columns if metric in col}
 
-            if is_relative:
-                sns.heatmap(scores.sort_index(ascending=False),
-                            annot=True, cmap=cmap, center=0, fmt=fmt[i], ax=axes[i])
-            else:
-                sns.heatmap(scores.sort_index(ascending=False),
-                            annot=True, cmap=cmap, fmt=fmt[i], ax=axes[i])
+        data_for_plot = (
+            self.TH_matrix.groupby('threshold')
+                .agg({'TH_l': 'min', 'TH_f': 'min', 'disbalance': 'min'} | add_metric_agg)
+        )
+
+        for prefix, ax, subset in zip(['_dc1', '_dc2'], ['A', 'B'], ['D_control_1', 'D_control_2']):
+            scores = data_for_plot.pivot(index='TH_l', columns='TH_f', values=metric + prefix)
+
+            sns.heatmap(scores.sort_index(ascending=False),
+                            annot=True, cmap=cmap, fmt=fmt, ax=axes[ax])
             
-            x_labels = [f'{float(label.get_text()):.2f}' for label in axes[i].xaxis.get_ticklabels()]
-            y_labels = [f'{float(label.get_text()):.2f}' for label in axes[i].yaxis.get_ticklabels()]
+            x_labels = [f'{float(label.get_text()):.2f}' for label in axes[ax].xaxis.get_ticklabels()]
+            y_labels = [f'{float(label.get_text()):.2f}' for label in axes[ax].yaxis.get_ticklabels()]
 
-            axes[i].set_xticklabels(x_labels)
-            axes[i].set_yticklabels(y_labels)
+            axes[ax].set_xticklabels(x_labels)
+            axes[ax].set_yticklabels(y_labels)
+            axes[ax].set_title(f'TH-matrix on {subset}')
 
-            axes[i].set_title(f'TH matrix for {metric}')
+        if compare_line:
+            data_for_plot['TH'] = data_for_plot.apply(lambda x: f"[{x['TH_l']:.3f}, {x['TH_f']:.3f}]", axis=1)
+            
+            metric_cols = [col for col in self.TH_matrix.columns if metric in col]
+            cols_to_compare = ['TH'] + metric_cols
+            data_for_compare = pd.melt(data_for_plot[cols_to_compare],
+                                       id_vars=['TH'], value_vars=metric_cols, value_name=metric)
+            
+            sns.lineplot(data_for_compare, x='TH', y=metric, hue='variable', ax=axes['C'])
+            axes['C'].set_xticklabels(axes['C'].get_xticklabels(), rotation=45, ha='right')
+        
+        fig.tight_layout()
 
 
     def compare_models(self, method, main_metric, thresh=None, show_curve: bool=False, figsize: tuple=(15, 5)):
